@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Package, Radio, RotateCcw, X, ShoppingBag, Search, Camera, AlertTriangle } from 'lucide-react';
+import { Package, Radio, RotateCcw, X, ShoppingBag, Search, Camera } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
@@ -29,30 +29,21 @@ export const Orders = () => {
   const { data: orders = [], isLoading } = useOrders(userId);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Only show active (visible) orders to the client — cancelled/returned are hidden
-  const activeOrders = orders.filter((o) => {
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      const idMatch = o.id.toLowerCase().includes(q);
-      const itemMatch = Array.isArray(o.items)
-        ? (o.items as OrderItem[]).some((item) => {
-            const name = typeof item.name === 'object'
-              ? (item.name as { ru: string; uz: string }).ru
-              : item.name;
-            return name?.toLowerCase().includes(q);
-          })
-        : false;
-      return idMatch || itemMatch;
-    }
-    return true;
-  });
+  const filteredOrders = searchQuery.trim()
+    ? orders.filter((order) => {
+        const q = searchQuery.toLowerCase();
+        const idMatch = order.id.toLowerCase().includes(q);
+        const itemMatch = Array.isArray(order.items)
+          ? order.items.some((item: OrderItem) => {
+              const name = typeof item.name === 'object' ? (item.name as { ru: string; uz: string }).ru : item.name;
+              return name?.toLowerCase().includes(q);
+            })
+          : false;
+        return idMatch || itemMatch;
+      })
+    : orders;
 
-  // Realtime subscription for status updates
   const realtimeRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
-
-  const [cancelModal, setCancelModal] = useState<Order | null>(null);
-  const [cancelReason, setCancelReason] = useState('');
-  const [cancelLoading, setCancelLoading] = useState(false);
 
   const [returnModal, setReturnModal] = useState<{ order: Order; selectedItems: number[] } | null>(null);
   const [returnReason, setReturnReason] = useState('');
@@ -64,6 +55,7 @@ export const Orders = () => {
 
   useEffect(() => {
     if (!userId) return;
+
     const channel = supabase
       .channel(`user-orders-${userId}`)
       .on(
@@ -79,73 +71,34 @@ export const Orders = () => {
         }
       )
       .subscribe();
+
     realtimeRef.current = channel;
-    return () => { supabase.removeChannel(channel); };
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [userId, queryClient]);
 
-  const handleCancelOrder = async () => {
-    if (!cancelModal || !userId) return;
-    if (!cancelReason.trim()) {
-      toast.error(language === 'ru' ? 'Укажите причину отмены' : "Bekor qilish sababini kiriting");
-      return;
-    }
-    setCancelLoading(true);
-    try {
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-      const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  const getPaymentMethodLabel = (method: string) => {
+    const labels: Record<string, { ru: string; uz: string }> = {
+      cash: { ru: 'Наличные', uz: 'Naqd pul' },
+      payme: { ru: 'Payme', uz: 'Payme' },
+      click: { ru: 'Click', uz: 'Click' },
+      uzum: { ru: 'Uzum Bank', uz: 'Uzum Bank' },
+    };
+    return labels[method]?.[language] || method;
+  };
 
-      const { data: rpcData, error: rpcError } = await supabase.rpc('cancel_order_by_client', {
-        p_order_id: cancelModal.id,
-        p_telegram_user_id: userId,
-        p_reason: cancelReason.trim(),
-      });
-
-      if (rpcError) {
-        // Fallback: direct update if RPC not yet deployed
-        const { error: updateErr } = await supabase
-          .from('orders')
-          .update({
-            status: 'cancelled',
-            is_visible_to_client: false,
-            cancel_reason: cancelReason.trim(),
-            cancelled_by: 'client',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', cancelModal.id)
-          .eq('telegram_user_id', userId);
-
-        if (updateErr) {
-          // Last resort: go through edge function
-          const resp = await fetch(`${supabaseUrl}/functions/v1/cancel-order`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${anonKey}`,
-              'Apikey': anonKey,
-            },
-            body: JSON.stringify({
-              order_id: cancelModal.id,
-              telegram_user_id: userId,
-              reason: cancelReason.trim(),
-            }),
-          });
-          if (!resp.ok) {
-            throw new Error('Не удалось отменить заказ');
-          }
-        }
-      }
-
-      haptic.success();
-      toast.success(language === 'ru' ? 'Заказ отменён' : 'Buyurtma bekor qilindi');
-      setCancelModal(null);
-      setCancelReason('');
-      queryClient.invalidateQueries({ queryKey: ['orders', userId] });
-    } catch {
-      haptic.error();
-      toast.error(language === 'ru' ? 'Не удалось отменить заказ' : "Buyurtmani bekor qilib bo'lmadi");
-    } finally {
-      setCancelLoading(false);
-    }
+  const canRequestReturn = (order: Order) => {
+    if (order.status !== 'delivered') return false;
+    const history = Array.isArray(order.status_history) ? order.status_history : [];
+    const deliveredEntry = history.find((h) => h.status === 'delivered');
+    const deliveredDate = deliveredEntry
+      ? new Date(deliveredEntry.changed_at)
+      : new Date(order.created_at);
+    const now = new Date();
+    const daysDiff = (now.getTime() - deliveredDate.getTime()) / (1000 * 60 * 60 * 24);
+    return daysDiff <= 14;
   };
 
   const handleReturnPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -154,8 +107,8 @@ export const Orders = () => {
     setReturnPhotoUploading(true);
     try {
       const toUpload = Array.from(files).slice(0, 5 - returnPhotos.length);
-      const urls = await Promise.all(toUpload.map((f) => uploadReturnPhoto.mutateAsync(f)));
-      setReturnPhotos((prev) => [...prev, ...urls].slice(0, 5));
+      const urls = await Promise.all(toUpload.map(f => uploadReturnPhoto.mutateAsync(f)));
+      setReturnPhotos(prev => [...prev, ...urls].slice(0, 5));
     } catch {
       toast.error(language === 'ru' ? 'Ошибка загрузки фото' : 'Fotosni yuklashda xatolik');
     } finally {
@@ -174,16 +127,17 @@ export const Orders = () => {
       toast.error(language === 'ru' ? 'Выберите товары для возврата' : "Qaytarish uchun mahsulotlarni tanlang");
       return;
     }
+
     setReturnLoading(true);
     try {
       const order = returnModal.order;
       const items = (Array.isArray(order.items) ? order.items : []) as OrderItem[];
-      const selected = returnModal.selectedItems.map((i) => items[i]);
+      const selected = returnModal.selectedItems.map(i => items[i]);
 
       await returnQueries.create({
         order_id: order.id,
         telegram_user_id: userId,
-        items: selected.map((item) => ({
+        items: selected.map(item => ({
           productId: item.productId,
           name: typeof item.name === 'object' ? (item.name as { ru: string; uz: string }).ru : item.name || '',
           quantity: item.quantity,
@@ -207,46 +161,37 @@ export const Orders = () => {
   const toggleReturnItem = (index: number) => {
     if (!returnModal) return;
     const selected = returnModal.selectedItems.includes(index)
-      ? returnModal.selectedItems.filter((i) => i !== index)
+      ? returnModal.selectedItems.filter(i => i !== index)
       : [...returnModal.selectedItems, index];
     setReturnModal({ ...returnModal, selectedItems: selected });
-  };
-
-  const canCancelOrder = (order: Order) => {
-    return !['delivered', 'cancelled', 'returned', 'return_requested', 'shipped'].includes(order.status ?? '');
-  };
-
-  const canRequestReturn = (order: Order) => {
-    if (order.status !== 'delivered') return false;
-    const history = Array.isArray(order.status_history) ? order.status_history : [];
-    const deliveredEntry = history.find((h) => h.status === 'delivered');
-    const deliveredDate = deliveredEntry
-      ? new Date(deliveredEntry.changed_at)
-      : new Date(order.created_at);
-    const daysDiff = (Date.now() - deliveredDate.getTime()) / (1000 * 60 * 60 * 24);
-    return daysDiff <= 14;
-  };
-
-  const getPaymentMethodLabel = (method: string) => {
-    const labels: Record<string, { ru: string; uz: string }> = {
-      cash: { ru: 'Наличные', uz: 'Naqd pul' },
-      payme: { ru: 'Payme', uz: 'Payme' },
-      click: { ru: 'Click', uz: 'Click' },
-      uzum: { ru: 'Uzum Bank', uz: 'Uzum Bank' },
-    };
-    return labels[method]?.[language] || method;
   };
 
   if (isLoading) {
     return (
       <Layout>
         <div className="container mx-auto px-4 py-4">
-          <h1 className="text-xl font-bold text-surface-900 dark:text-white mb-4">{t('order_history')}</h1>
+          <h1 className="text-xl font-bold text-surface-900 dark:text-white mb-4">
+            {t('order_history')}
+          </h1>
           <div className="space-y-3">
             {[1, 2, 3].map((i) => (
-              <div key={i} className="bg-white dark:bg-surface-800 rounded-2xl p-4 animate-pulse">
-                <div className="h-4 bg-surface-100 dark:bg-surface-700 rounded-lg w-1/3 mb-3" />
-                <div className="h-3 bg-surface-100 dark:bg-surface-700 rounded-lg w-2/3" />
+              <div key={i} className="bg-white dark:bg-surface-800 rounded-2xl overflow-hidden shadow-card">
+                <div className="p-4 space-y-3">
+                  <div className="flex justify-between">
+                    <div className="h-4 w-24 bg-surface-100 dark:bg-surface-700 rounded-lg animate-pulse" />
+                    <div className="h-5 w-16 bg-surface-100 dark:bg-surface-700 rounded-full animate-pulse" />
+                  </div>
+                  <div className="flex gap-3">
+                    <div className="w-12 h-12 bg-surface-100 dark:bg-surface-700 rounded-xl animate-pulse" />
+                    <div className="flex-1 space-y-2">
+                      <div className="h-3 w-3/4 bg-surface-100 dark:bg-surface-700 rounded-lg animate-pulse" />
+                      <div className="h-3 w-1/2 bg-surface-100 dark:bg-surface-700 rounded-lg animate-pulse" />
+                    </div>
+                  </div>
+                  <div className="border-t border-surface-100 dark:border-surface-700 pt-3">
+                    <div className="h-3 w-1/3 bg-surface-100 dark:bg-surface-700 rounded-lg animate-pulse" />
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -255,13 +200,17 @@ export const Orders = () => {
     );
   }
 
-  if (activeOrders.length === 0 && !searchQuery) {
+  if (orders.length === 0) {
     return (
       <Layout>
         <div className="container mx-auto px-4 py-12 text-center">
           <Package className="w-24 h-24 text-surface-300 dark:text-surface-600 mx-auto mb-4" />
-          <h2 className="text-2xl font-bold text-surface-900 dark:text-white mb-2">{t('no_orders')}</h2>
-          <p className="text-surface-600 dark:text-surface-400 mb-6">{t('continue_shopping')}</p>
+          <h2 className="text-2xl font-bold text-surface-900 dark:text-white mb-2">
+            {t('no_orders')}
+          </h2>
+          <p className="text-surface-600 dark:text-surface-400 mb-6">
+            {t('continue_shopping')}
+          </p>
           <button
             onClick={() => navigate('/catalog')}
             className="bg-brand-600 text-white px-6 py-3 rounded-xl font-semibold hover:bg-brand-700 transition-colors"
@@ -277,7 +226,9 @@ export const Orders = () => {
     <Layout>
       <div className="container mx-auto px-4 py-4">
         <div className="flex items-center justify-between mb-4">
-          <h1 className="text-xl font-bold text-surface-900 dark:text-white">{t('order_history')}</h1>
+          <h1 className="text-xl font-bold text-surface-900 dark:text-white">
+            {t('order_history')}
+          </h1>
           <div className="flex items-center gap-1.5 text-xs text-surface-400">
             <Radio className="w-3 h-3 text-success animate-pulse-soft" />
             <span>{language === 'ru' ? 'Онлайн' : 'Onlayn'}</span>
@@ -297,17 +248,13 @@ export const Orders = () => {
           </div>
         )}
 
-        {searchQuery && activeOrders.length === 0 && (
-          <div className="text-center py-12 text-surface-400 text-sm">
-            {language === 'ru' ? 'Заказы не найдены' : 'Buyurtmalar topilmadi'}
-          </div>
-        )}
-
         <div className="space-y-3 pb-4">
-          {activeOrders.map((order) => (
-            <div key={order.id} className="bg-white dark:bg-surface-800 rounded-2xl overflow-hidden shadow-card">
+          {filteredOrders.map((order) => (
+            <div
+              key={order.id}
+              className="bg-white dark:bg-surface-800 rounded-2xl overflow-hidden shadow-card"
+            >
               <div className="p-4">
-                {/* Header */}
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <p className="text-xs font-mono font-semibold text-surface-900 dark:text-white">
@@ -317,22 +264,29 @@ export const Orders = () => {
                       {formatDateTime(order.created_at, language)}
                     </p>
                   </div>
-                  <span className={`px-3 py-1 rounded-full text-xs font-semibold ${getStatusColor(order.status)}`}>
+                  <span
+                    className={`px-3 py-1 rounded-full text-xs font-semibold ${getStatusColor(order.status)}`}
+                  >
                     {getStatusLabel(order.status, language)}
                   </span>
                 </div>
 
-                {/* Items */}
                 <div className="space-y-2 mb-3">
                   {(Array.isArray(order.items) ? (order.items as OrderItem[]) : [])
                     .slice(0, 2)
-                    .map((item, index) => (
+                    .map((item: OrderItem, index: number) => (
                       <div key={index} className="flex items-center gap-3">
                         <div className="w-12 h-12 bg-surface-100 dark:bg-surface-700 rounded-xl overflow-hidden flex-shrink-0">
                           {item.image ? (
-                            <img src={item.image} alt={getLocalizedValue(item.name, language)} className="w-full h-full object-cover" />
+                            <img
+                              src={item.image}
+                              alt={getLocalizedValue(item.name, language)}
+                              className="w-full h-full object-cover"
+                            />
                           ) : (
-                            <div className="w-full h-full flex items-center justify-center text-surface-400 text-xs">{t('no_image')}</div>
+                            <div className="w-full h-full flex items-center justify-center text-surface-400 text-xs">
+                              {t('no_image')}
+                            </div>
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
@@ -353,138 +307,96 @@ export const Orders = () => {
                   )}
                 </div>
 
-                {/* Footer */}
                 <div className="border-t border-surface-100 dark:border-surface-700 pt-3 space-y-2">
                   <div className="flex justify-between items-center text-sm">
-                    <span className="text-surface-500 dark:text-surface-400">{t('payment_method')}</span>
-                    <span className="font-medium text-surface-900 dark:text-white">{getPaymentMethodLabel(order.payment_method)}</span>
+                    <span className="text-surface-500 dark:text-surface-400">
+                      {t('payment_method')}
+                    </span>
+                    <span className="font-medium text-surface-900 dark:text-white">
+                      {getPaymentMethodLabel(order.payment_method)}
+                    </span>
                   </div>
+
+                  <div className="flex justify-between items-center text-sm">
+                    <span className="text-surface-500 dark:text-surface-400">
+                      {t('delivery')}
+                    </span>
+                    <span className="font-medium text-surface-900 dark:text-white">
+                      {order.delivery_type === 'express'
+                        ? language === 'ru'
+                          ? 'Экспресс'
+                          : 'Ekspress'
+                        : language === 'ru'
+                        ? 'Стандарт'
+                        : 'Standart'}{' '}
+                      ({formatPrice(order.delivery_cost as number)})
+                    </span>
+                  </div>
+
                   <div className="flex justify-between items-center pt-2 border-t border-surface-100 dark:border-surface-700">
-                    <span className="font-semibold text-surface-900 dark:text-white text-sm">{t('total')}</span>
+                    <span className="font-semibold text-surface-900 dark:text-white text-sm">
+                      {t('total')}
+                    </span>
                     <span className="text-lg font-extrabold text-surface-900">
                       {formatPrice(order.total_amount as number)}
                     </span>
                   </div>
                 </div>
 
-                {/* Actions */}
-                <div className="mt-3 space-y-2">
-                  {/* Reorder for delivered */}
-                  {order.status === 'delivered' && (
-                    <button
-                      onClick={async () => {
-                        const items = (Array.isArray(order.items) ? order.items : []) as OrderItem[];
-                        const cartAdd = useCartStore.getState().addItem;
-                        let addedCount = 0;
-                        for (const item of items) {
-                          const { data: product } = await supabase
-                            .from('products').select('stock, is_active').eq('id', item.productId).maybeSingle();
-                          if (product && product.is_active && product.stock > 0) {
-                            const qty = Math.min(item.quantity, product.stock);
-                            cartAdd({
-                              productId: item.productId,
-                              name: typeof item.name === 'object' ? item.name : { ru: String(item.name), uz: String(item.name) },
-                              price: item.price,
-                              quantity: qty,
-                              image: item.image || '',
-                              size: item.size,
-                              color: item.color ? { name: item.color, hex: '' } : undefined,
-                            });
-                            addedCount++;
-                          }
-                        }
-                        if (addedCount > 0) {
-                          haptic.addToCart();
-                          toast.success(language === 'ru' ? `${addedCount} товар(ов) добавлено в корзину` : `${addedCount} mahsulot savatga qo'shildi`);
-                          navigate('/cart');
-                        } else {
-                          haptic.error();
-                          toast.error(language === 'ru' ? 'Товары больше не доступны' : 'Mahsulotlar mavjud emas');
-                        }
-                      }}
-                      className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium transition"
-                    >
-                      <ShoppingBag className="w-4 h-4" />
-                      {language === 'ru' ? 'Заказать снова' : 'Qaytadan buyurtma berish'}
-                    </button>
-                  )}
+                {canRequestReturn(order) && (
+                  <button
+                    onClick={() => setReturnModal({ order, selectedItems: [] })}
+                    className="mt-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-surface-200 dark:border-surface-600 text-sm font-medium text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-700 transition"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    {language === 'ru' ? 'Запросить возврат' : "Qaytarish so'rovi"}
+                  </button>
+                )}
 
-                  {/* Return request */}
-                  {canRequestReturn(order) && (
-                    <button
-                      onClick={() => setReturnModal({ order, selectedItems: [] })}
-                      className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border border-surface-200 dark:border-surface-600 text-sm font-medium text-surface-700 dark:text-surface-300 hover:bg-surface-50 dark:hover:bg-surface-700 transition"
-                    >
-                      <RotateCcw className="w-4 h-4" />
-                      {language === 'ru' ? 'Запросить возврат' : "Qaytarish so'rovi"}
-                    </button>
-                  )}
-
-                  {/* Cancel order */}
-                  {canCancelOrder(order) && (
-                    <button
-                      onClick={() => { setCancelModal(order); setCancelReason(''); }}
-                      className="w-full flex items-center justify-center gap-2 py-2 rounded-xl border border-red-200 dark:border-red-800 text-sm font-medium text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition"
-                    >
-                      <X className="w-4 h-4" />
-                      {language === 'ru' ? 'Отменить заказ' : 'Buyurtmani bekor qilish'}
-                    </button>
-                  )}
-                </div>
+                {order.status === 'delivered' && (
+                  <button
+                    onClick={async () => {
+                      const items = (Array.isArray(order.items) ? order.items : []) as OrderItem[];
+                      const cartAdd = useCartStore.getState().addItem;
+                      let addedCount = 0;
+                      for (const item of items) {
+                        const { data: product } = await supabase
+                          .from('products').select('stock, is_active').eq('id', item.productId).maybeSingle();
+                        if (product && product.is_active && product.stock > 0) {
+                          const qty = Math.min(item.quantity, product.stock);
+                          cartAdd({
+                            productId: item.productId,
+                            name: typeof item.name === 'object' ? item.name : { ru: String(item.name), uz: String(item.name) },
+                            price: item.price,
+                            quantity: qty,
+                            image: item.image || '',
+                            size: item.size,
+                            color: item.color ? { name: item.color, hex: '' } : undefined,
+                          });
+                          addedCount++;
+                        }
+                      }
+                      if (addedCount > 0) {
+                        haptic.addToCart();
+                        toast.success(language === 'ru' ? `${addedCount} товар(ов) добавлено в корзину` : `${addedCount} mahsulot savatga qo'shildi`);
+                        navigate('/cart');
+                      } else {
+                        haptic.error();
+                        toast.error(language === 'ru' ? 'Товары больше не доступны' : 'Mahsulotlar mavjud emas');
+                      }
+                    }}
+                    className="mt-2 w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium transition"
+                  >
+                    <ShoppingBag className="w-4 h-4" />
+                    {language === 'ru' ? 'Заказать снова' : 'Qaytadan buyurtma berish'}
+                  </button>
+                )}
               </div>
             </div>
           ))}
         </div>
       </div>
 
-      {/* Cancel Modal */}
-      {cancelModal && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="bg-white dark:bg-surface-800 rounded-t-2xl sm:rounded-2xl p-6 w-full max-w-md">
-            <div className="flex items-center gap-2 mb-4">
-              <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0" />
-              <h2 className="text-lg font-bold text-surface-900 dark:text-white">
-                {language === 'ru' ? 'Отменить заказ?' : 'Buyurtmani bekor qilish?'}
-              </h2>
-            </div>
-            <p className="text-sm text-surface-500 dark:text-surface-400 mb-4">
-              {language === 'ru'
-                ? 'Заказ будет отменён. Если вы уже оплатили — свяжитесь с нами для возврата средств.'
-                : "Buyurtma bekor qilinadi. Agar to'lagan bo'lsangiz — pul qaytarish uchun biz bilan bog'laning."}
-            </p>
-            <div className="mb-4">
-              <label className="block text-xs font-semibold text-surface-500 mb-1.5">
-                {language === 'ru' ? 'Причина отмены *' : "Bekor qilish sababi *"}
-              </label>
-              <textarea
-                value={cancelReason}
-                onChange={(e) => setCancelReason(e.target.value)}
-                rows={3}
-                placeholder={language === 'ru' ? 'Укажите причину...' : 'Sababni yozing...'}
-                className="w-full px-3 py-2.5 bg-surface-50 dark:bg-surface-700 border border-surface-200 dark:border-surface-600 rounded-xl text-sm text-surface-900 dark:text-white resize-none focus:outline-none focus:ring-2 focus:ring-surface-900"
-              />
-            </div>
-            <div className="flex gap-3">
-              <button
-                onClick={() => { setCancelModal(null); setCancelReason(''); }}
-                className="flex-1 py-2.5 rounded-xl border border-surface-200 dark:border-surface-600 text-surface-700 dark:text-surface-300 text-sm font-medium hover:bg-surface-50 dark:hover:bg-surface-700 transition"
-              >
-                {t('cancel')}
-              </button>
-              <button
-                onClick={handleCancelOrder}
-                disabled={cancelLoading || !cancelReason.trim()}
-                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-medium transition flex items-center justify-center gap-2"
-              >
-                {cancelLoading && <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
-                {language === 'ru' ? 'Отменить заказ' : 'Bekor qilish'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Return Modal */}
       {returnModal && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="bg-white dark:bg-surface-800 rounded-t-2xl sm:rounded-2xl p-6 w-full max-w-md max-h-[85vh] overflow-y-auto">
@@ -504,7 +416,7 @@ export const Orders = () => {
               {(returnModal.order.items as OrderItem[]).map((item, index) => (
                 <label
                   key={index}
-                  className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${
+                  className={`flex items-center gap-3 p-3 rounded-xl border transition ${
                     returnModal.selectedItems.includes(index)
                       ? 'border-surface-900 bg-surface-50 dark:bg-surface-700'
                       : 'border-surface-200 dark:border-surface-600'
@@ -545,7 +457,6 @@ export const Orders = () => {
               />
             </div>
 
-            {/* Photos */}
             <div className="mb-5">
               <label className="text-xs font-semibold text-surface-500 uppercase tracking-wide mb-2 block">
                 {language === 'ru' ? 'Фото дефекта (необязательно)' : "Nuqson fotosi (ixtiyoriy)"}
@@ -553,10 +464,10 @@ export const Orders = () => {
               {returnPhotos.length > 0 && (
                 <div className="flex flex-wrap gap-2 mb-3">
                   {returnPhotos.map((url, i) => (
-                    <div key={i} className="relative w-16 h-16 rounded-xl overflow-hidden border border-surface-200 dark:border-surface-600">
+                    <div key={i} className="relative w-20 h-20 rounded-xl overflow-hidden border border-surface-200 dark:border-surface-600">
                       <img src={url} alt="" className="w-full h-full object-cover" />
                       <button
-                        onClick={() => setReturnPhotos((prev) => prev.filter((_, j) => j !== i))}
+                        onClick={() => setReturnPhotos(prev => prev.filter((_, j) => j !== i))}
                         className="absolute top-1 right-1 w-5 h-5 bg-black/60 rounded-full flex items-center justify-center"
                       >
                         <X className="w-3 h-3 text-white" />
@@ -574,10 +485,12 @@ export const Orders = () => {
                 >
                   {returnPhotoUploading
                     ? <span className="w-4 h-4 border-2 border-surface-400 border-t-surface-800 rounded-full animate-spin" />
-                    : <Camera className="w-4 h-4" />}
+                    : <Camera className="w-4 h-4" />
+                  }
                   {returnPhotoUploading
                     ? (language === 'ru' ? 'Загрузка...' : 'Yuklanmoqda...')
-                    : (language === 'ru' ? 'Добавить фото' : "Foto qo'shish")}
+                    : (language === 'ru' ? 'Добавить фото' : "Foto qo'shish")
+                  }
                 </button>
               )}
               <input

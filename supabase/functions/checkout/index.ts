@@ -223,63 +223,6 @@ Deno.serve(async (req: Request) => {
 
     if (orderError || !order) {
       console.error("Order creation error:", orderError);
-      // Fallback: if RPC doesn't exist yet, create order manually and deduct stock inline
-      if (orderError?.message?.includes("create_order_with_stock") || orderError?.code === "PGRST202") {
-        // Manual order creation + stock deduction
-        const { data: manualOrder, error: manualErr } = await supabase
-          .from("orders")
-          .insert({
-            telegram_user_id: body.telegram_user_id,
-            items: body.items,
-            total_amount: body.total_amount,
-            customer_info: body.customer_info,
-            delivery_type: body.delivery_type,
-            delivery_cost: body.delivery_cost,
-            payment_method: body.payment_method,
-            notes: body.notes || null,
-            coupon_id: body.coupon_id || null,
-            discount_amount: discountAmount,
-            status: body.payment_method === "cash" ? "new" : "processing",
-            status_history: [{ status: body.payment_method === "cash" ? "new" : "processing", changed_at: new Date().toISOString(), changed_by: "system" }],
-            is_archived: false,
-            is_visible_to_client: true,
-          })
-          .select()
-          .single();
-
-        if (manualErr || !manualOrder) {
-          return new Response(
-            JSON.stringify({ error: manualErr?.message || "Failed to create order" }),
-            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-          );
-        }
-
-        // Deduct stock manually
-        for (const item of body.items as Array<{ productId: string; quantity: number }>) {
-          if (item.productId && item.quantity > 0) {
-            const { data: product } = await supabase
-              .from("products").select("stock").eq("id", item.productId).maybeSingle();
-            if (product) {
-              await supabase.from("products")
-                .update({ stock: Math.max(0, (product.stock || 0) - item.quantity), updated_at: new Date().toISOString() })
-                .eq("id", item.productId);
-            }
-          }
-        }
-
-        // Send new order notification
-        await sendOrderNotification(supabase, manualOrder.id, body.telegram_user_id, body.total_amount);
-
-        if (body.coupon_id) {
-          await supabase.from("coupon_usage").insert({ coupon_id: body.coupon_id, telegram_user_id: body.telegram_user_id, order_id: manualOrder.id }).catch(() => {});
-        }
-
-        return new Response(
-          JSON.stringify({ success: true, order: { id: manualOrder.id, status: manualOrder.status, total_amount: manualOrder.total_amount } }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
       return new Response(
         JSON.stringify({ error: orderError?.message || "Failed to create order" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -292,7 +235,7 @@ Deno.serve(async (req: Request) => {
         coupon_id: body.coupon_id,
         telegram_user_id: body.telegram_user_id,
         order_id: order.id,
-      }).catch(() => {});
+      });
     }
 
     // Log the order creation
@@ -307,10 +250,7 @@ Deno.serve(async (req: Request) => {
         payment_method: body.payment_method,
         items_count: body.items.length,
       },
-    }).catch(() => {});
-
-    // Send new order notification to client
-    await sendOrderNotification(supabase, order.id, body.telegram_user_id, body.total_amount);
+    });
 
     return new Response(
       JSON.stringify({
@@ -331,34 +271,3 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
-
-async function sendOrderNotification(
-  supabase: ReturnType<typeof createClient>,
-  orderId: string,
-  telegramUserId: number,
-  totalAmount: number
-): Promise<void> {
-  // In-app notification
-  await supabase.from("notifications").insert({
-    telegram_user_id: telegramUserId,
-    type: "order_new",
-    title: `Заказ #${orderId.slice(0, 8).toUpperCase()} принят`,
-    body: "Ваш заказ принят. Мы свяжемся с вами в ближайшее время.",
-    data: { order_id: orderId },
-    notification_channel: "both",
-  }).catch(() => {});
-
-  // Telegram message
-  const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
-  if (botToken) {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: telegramUserId,
-        text: `✅ Ваш заказ <b>#${orderId.slice(0, 8).toUpperCase()}</b> принят!\n\n💰 Сумма: ${Number(totalAmount).toLocaleString("ru-RU")} сум\n\nМы свяжемся с вами для подтверждения.`,
-        parse_mode: "HTML",
-      }),
-    }).catch(() => {});
-  }
-}

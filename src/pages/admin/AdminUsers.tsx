@@ -6,7 +6,7 @@ import { supabase } from '../../lib/supabase';
 import { getCurrentAdmin, AdminRole, ROLE_LABELS } from '../../lib/auth';
 import { formatPrice } from '../../lib/utils';
 import { auditLogQueries } from '../../lib/supabase/queries';
-import type { OrderItem, CustomerInfo, Database } from '../../lib/supabase';
+import type { OrderItem, CustomerInfo } from '../../lib/supabase';
 import { adminQueries } from '../../lib/adminApi';
 
 interface AdminAccount {

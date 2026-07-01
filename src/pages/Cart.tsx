@@ -1,13 +1,11 @@
 import { useState } from 'react';
-import { Trash2, Minus, Plus, ShoppingBag, Lock, ArrowLeft, AlertTriangle } from 'lucide-react';
+import { Trash2, Minus, Plus, ShoppingBag, Lock, ArrowLeft } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Layout } from '../components/Layout';
 import { useTranslation } from '../hooks/useTranslation';
 import { useCartStore } from '../store/useCartStore';
 import { formatPrice, getLocalizedValue } from '../lib/utils';
 import { haptic } from '../lib/telegram';
-import { supabase } from '../lib/supabase';
-import { toast } from '../components/Toast';
 
 export const Cart = () => {
   const { t, language } = useTranslation();
@@ -18,7 +16,6 @@ export const Cart = () => {
   const getTotalPrice = useCartStore((state) => state.getTotalPrice);
   const getTotalItems = useCartStore((state) => state.getTotalItems);
   const [confirmRemove, setConfirmRemove] = useState<{ productId: string; size?: string; colorHex?: string } | null>(null);
-  const [stockValidating, setStockValidating] = useState(false);
 
   const handleRemove = (productId: string, size?: string, colorHex?: string) => {
     setConfirmRemove({ productId, size, colorHex });
@@ -32,106 +29,12 @@ export const Cart = () => {
     }
   };
 
-  const handleUpdateQty = async (
-    productId: string,
-    newQty: number,
-    size?: string,
-    color?: { name: string; hex: string }
-  ) => {
+  const handleUpdateQty = (productId: string, newQty: number, size?: string, color?: { name: string; hex: string }) => {
     if (newQty < 1) {
       handleRemove(productId, size, color?.hex);
       return;
     }
-
-    // Check stock before allowing increase
-    if (newQty > (items.find((i) => i.productId === productId && i.size === size && i.color?.hex === color?.hex)?.quantity ?? 0)) {
-      try {
-        const { data: product } = await supabase
-          .from('products')
-          .select('stock')
-          .eq('id', productId)
-          .maybeSingle();
-
-        if (product && newQty > product.stock) {
-          toast.warning(
-            language === 'ru'
-              ? `Доступно только ${product.stock} шт.`
-              : `Faqat ${product.stock} ta mavjud`
-          );
-          updateQuantity(productId, product.stock, size, color?.hex);
-          return;
-        }
-      } catch {
-        // Silent — allow if can't check
-      }
-    }
-
     updateQuantity(productId, newQty, size, color?.hex);
-  };
-
-  // Validate all cart items against current stock before checkout
-  const handleCheckout = async () => {
-    setStockValidating(true);
-    try {
-      const productIds = [...new Set(items.map((i) => i.productId))];
-      const { data: products } = await supabase
-        .from('products')
-        .select('id, stock, is_active, name')
-        .in('id', productIds);
-
-      if (!products) {
-        navigate('/checkout');
-        return;
-      }
-
-      let hasIssues = false;
-      for (const item of items) {
-        const product = products.find((p) => p.id === item.productId);
-        if (!product || !product.is_active) {
-          toast.error(
-            language === 'ru'
-              ? `Товар "${getLocalizedValue(item.name, language)}" недоступен`
-              : `"${getLocalizedValue(item.name, language)}" mahsulot mavjud emas`
-          );
-          removeItem(item.productId, item.size, item.color?.hex);
-          hasIssues = true;
-          continue;
-        }
-        if (product.stock < item.quantity) {
-          if (product.stock === 0) {
-            toast.error(
-              language === 'ru'
-                ? `"${getLocalizedValue(item.name, language)}" закончился`
-                : `"${getLocalizedValue(item.name, language)}" tugadi`
-            );
-            removeItem(item.productId, item.size, item.color?.hex);
-          } else {
-            toast.warning(
-              language === 'ru'
-                ? `"${getLocalizedValue(item.name, language)}" — осталось ${product.stock} шт.`
-                : `"${getLocalizedValue(item.name, language)}" — ${product.stock} ta qoldi`
-            );
-            updateQuantity(item.productId, product.stock, item.size, item.color?.hex);
-          }
-          hasIssues = true;
-        }
-      }
-
-      if (!hasIssues) {
-        navigate('/checkout');
-      } else {
-        toast.info(
-          language === 'ru'
-            ? 'Корзина обновлена — проверьте количество'
-            : "Savat yangilandi — miqdorni tekshiring"
-        );
-      }
-    } catch {
-      // If validation fails, proceed anyway — checkout will do final validation
-      navigate('/checkout');
-    } finally {
-      setStockValidating(false);
-    }
   };
 
   const totalItems = getTotalItems();
@@ -148,9 +51,7 @@ export const Cart = () => {
             {language === 'ru' ? 'Корзина пуста' : "Savat bo'sh"}
           </h2>
           <p className="text-sm text-surface-500 dark:text-surface-400 mb-6 text-center max-w-[240px]">
-            {language === 'ru'
-              ? 'Добавьте товары из каталога, чтобы оформить заказ'
-              : "Buyurtma berish uchun katalogdan mahsulotlar qo'shing"}
+            {language === 'ru' ? 'Добавьте товары из каталога, чтобы оформить заказ' : "Buyurtma berish uchun katalogdan mahsulotlar qo'shing"}
           </p>
           <button
             onClick={() => navigate('/catalog')}
@@ -180,9 +81,7 @@ export const Cart = () => {
                 {t('cart')}
               </h1>
               <p className="text-xs text-surface-400 dark:text-surface-500">
-                {totalItems} {language === 'ru'
-                  ? (totalItems === 1 ? 'товар' : totalItems < 5 ? 'товара' : 'товаров')
-                  : 'mahsulot'}
+                {totalItems} {language === 'ru' ? (totalItems === 1 ? 'товар' : totalItems < 5 ? 'товара' : 'товаров') : 'mahsulot'}
               </p>
             </div>
           </div>
@@ -198,8 +97,10 @@ export const Cart = () => {
                 className="bg-white dark:bg-surface-800 rounded-2xl p-3 shadow-sm border border-surface-100 dark:border-surface-700"
               >
                 <div className="flex gap-3">
-                  {/* Image */}
-                  <div className="w-20 h-20 bg-surface-100 dark:bg-surface-700 rounded-xl overflow-hidden flex-shrink-0">
+          {/* Image */}
+          <div
+            className="w-20 h-20 bg-surface-100 dark:bg-surface-700 rounded-xl overflow-hidden flex-shrink-0 cursor-pointer"
+          >
                     {item.image ? (
                       <img
                         src={item.image}
@@ -251,9 +152,7 @@ export const Cart = () => {
 
                       <div className="flex items-center gap-1.5">
                         <button
-                          onClick={() =>
-                            handleUpdateQty(item.productId, item.quantity - 1, item.size, item.color)
-                          }
+                          onClick={() => handleUpdateQty(item.productId, item.quantity - 1, item.size, item.color)}
                           className="w-10 h-10 rounded-lg bg-surface-100 dark:bg-surface-700 flex items-center justify-center active:scale-90 transition disabled:opacity-30"
                           disabled={item.quantity <= 1}
                         >
@@ -263,9 +162,7 @@ export const Cart = () => {
                           {item.quantity}
                         </span>
                         <button
-                          onClick={() =>
-                            handleUpdateQty(item.productId, item.quantity + 1, item.size, item.color)
-                          }
+                          onClick={() => handleUpdateQty(item.productId, item.quantity + 1, item.size, item.color)}
                           className="w-10 h-10 rounded-lg bg-surface-100 dark:bg-surface-700 flex items-center justify-center active:scale-90 transition"
                         >
                           <Plus className="w-4 h-4 text-surface-600 dark:text-surface-300" />
@@ -306,19 +203,12 @@ export const Cart = () => {
             </div>
           </div>
 
+          {/* Checkout button */}
           <button
-            onClick={handleCheckout}
-            disabled={stockValidating}
-            className="w-full py-3.5 rounded-xl bg-brand-600 hover:bg-brand-700 active:scale-[0.98] disabled:opacity-70 text-white text-sm font-semibold transition-all flex items-center justify-center gap-2"
+            onClick={() => navigate('/checkout')}
+            className="w-full py-3.5 rounded-xl bg-brand-600 hover:bg-brand-700 active:scale-[0.98] text-white text-sm font-semibold transition-all flex items-center justify-center gap-2"
           >
-            {stockValidating ? (
-              <>
-                <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                {language === 'ru' ? 'Проверка...' : 'Tekshirilmoqda...'}
-              </>
-            ) : (
-              language === 'ru' ? 'Оформить заказ' : 'Buyurtma berish'
-            )}
+            {language === 'ru' ? 'Оформить заказ' : 'Buyurtma berish'}
           </button>
 
           <div className="flex items-center justify-center gap-1.5 mt-2">
@@ -334,12 +224,12 @@ export const Cart = () => {
       {confirmRemove && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm px-8">
           <div className="bg-white dark:bg-surface-800 rounded-2xl p-5 w-full max-w-xs shadow-xl">
-            <div className="flex items-center gap-2 mb-3">
-              <AlertTriangle className="w-5 h-5 text-warning flex-shrink-0" />
-              <p className="text-sm font-medium text-surface-900 dark:text-white">
-                {language === 'ru' ? 'Удалить из корзины?' : "Savatdan o'chirish?"}
-              </p>
-            </div>
+            <p className="text-sm font-medium text-surface-900 dark:text-white text-center mb-1">
+              {language === 'ru' ? 'Удалить из корзины?' : "Savatdan o'chirish?"}
+            </p>
+            <p className="text-xs text-surface-400 text-center mb-5">
+              {language === 'ru' ? 'Товар будет убран' : "Mahsulot o'chiriladi"}
+            </p>
             <div className="flex gap-3">
               <button
                 onClick={() => setConfirmRemove(null)}

@@ -18,28 +18,9 @@ export const orderQueries = {
 
   getByTelegramUserId: async (telegramUserId: number) => {
     if (!isSupabaseConfigured) { await delay(); return mockOrders; }
-    // Client only sees orders visible to them (cancelled/returned are hidden)
-    const { data, error } = await supabase
-      .from('orders')
-      .select('*')
-      .eq('telegram_user_id', telegramUserId)
-      .eq('is_visible_to_client', true)
-      .order('created_at', { ascending: false })
-      .limit(50);
-    if (error) {
-      // Fallback: if column doesn't exist yet (migration pending), return all
-      if (error.message?.includes('is_visible_to_client')) {
-        const { data: fallback } = await supabase
-          .from('orders')
-          .select('*')
-          .eq('telegram_user_id', telegramUserId)
-          .order('created_at', { ascending: false })
-          .limit(50);
-        return fallback ?? [];
-      }
-      throw error;
-    }
-    return data ?? [];
+    const { data, error } = await supabase.from('orders').select('*').eq('telegram_user_id', telegramUserId).order('created_at', { ascending: false }).limit(50);
+    if (error) throw error;
+    return data;
   },
 
   getById: async (id: string) => {

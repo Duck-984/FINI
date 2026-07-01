@@ -169,10 +169,10 @@ Deno.serve(async (req: Request) => {
 
       case "updateOrderStatus": {
         if (!id) throw new Error("ID required");
-        const { status, changed_by, note } = data;
+        const { status, changed_by } = data;
         const { data: order, error: fetchErr } = await supabase
           .from("orders")
-          .select("status_history, telegram_user_id, total_amount")
+          .select("status_history, telegram_user_id")
           .eq("id", id)
           .maybeSingle();
         if (fetchErr) throw fetchErr;
@@ -182,12 +182,7 @@ Deno.serve(async (req: Request) => {
           status,
           changed_at: new Date().toISOString(),
           changed_by: changed_by || "Admin",
-          note: note || "",
         };
-
-        // Auto-archive cancelled/returned orders + hide from client
-        const archiveStatuses = ["cancelled", "returned"];
-        const isArchiving = archiveStatuses.includes(status);
 
         const { data: updatedOrder, error: updateErr } = await supabase
           .from("orders")
@@ -195,64 +190,25 @@ Deno.serve(async (req: Request) => {
             status,
             status_history: [...history, newEntry],
             updated_at: new Date().toISOString(),
-            ...(isArchiving ? {
-              is_archived: true,
-              archived_at: new Date().toISOString(),
-              archive_reason: note || `Статус изменён на: ${status}`,
-              is_visible_to_client: false,
-              cancelled_by: changed_by || "admin",
-            } : {}),
           })
           .eq("id", id)
           .select()
           .single();
         if (updateErr) throw updateErr;
 
-        // Restore stock on cancellation by admin
-        if (status === "cancelled") {
-          await supabase.rpc("restore_stock_for_order", { p_order_id: id }).maybeSingle().catch(() => {});
-        }
-
-        // Send in-app + Telegram notifications to client
         if (order?.telegram_user_id) {
-          const NOTIF_TEXTS: Record<string, { title: string; body: string; telegram: string }> = {
-            new:              { title: "Заказ принят",              body: "Ваш заказ принят. Мы свяжемся с вами.",                    telegram: "✅ Ваш заказ принят! Мы свяжемся с вами в ближайшее время." },
-            processing:       { title: "Заказ в обработке",         body: "Ваш заказ принят в обработку.",                              telegram: "⚙️ Ваш заказ принят в обработку." },
-            assembling:       { title: "Заказ собирается",          body: "Ваш заказ комплектуется на складе.",                         telegram: "📦 Ваш заказ собирается на складе." },
-            assembled:        { title: "Заказ собран",              body: "Ваш заказ готов к отправке.",                               telegram: "✅ Ваш заказ собран и готов к отправке!" },
-            shipping:         { title: "Заказ передан курьеру",     body: "Ваш заказ в пути.",                                          telegram: "🚚 Ваш заказ передан курьеру! Ожидайте доставку." },
-            shipped:          { title: "Заказ отправлен",           body: "Ваш заказ отправлен.",                                       telegram: "📬 Ваш заказ отправлен! Скоро будет у вас." },
-            delivered:        { title: "Заказ доставлен",           body: "Ваш заказ доставлен! Спасибо за покупку!",                  telegram: "🎉 Ваш заказ доставлен! Спасибо за покупку! Если что-то не так — оформите возврат в течение 14 дней." },
-            cancelled:        { title: "Заказ отменён",             body: `Ваш заказ отменён${note ? `. Причина: ${note}` : ""}.`,     telegram: `❌ Ваш заказ отменён.${note ? `\n\nПричина: ${note}` : ""}\n\nЕсли вы оплатили — средства вернутся в течение 3-5 рабочих дней.` },
-            return_requested: { title: "Заявка на возврат получена",body: "Мы получили вашу заявку на возврат.",                        telegram: "📋 Ваша заявка на возврат получена. Рассмотрим в течение 1-2 рабочих дней." },
+          const STATUS_LABELS: Record<string, string> = {
+            new: "Новый", processing: "В обработке", assembling: "В сборке",
+            assembled: "Собран", shipping: "В доставке", delivered: "Доставлен",
+            cancelled: "Отменён", return_requested: "Возврат", returned: "Возвращён",
           };
-
-          const notif = NOTIF_TEXTS[status];
-          if (notif) {
-            // In-app notification
-            await supabase.from("notifications").insert({
-              telegram_user_id: order.telegram_user_id,
-              type: `order_${status}`,
-              title: `${notif.title} #${id.slice(0, 8).toUpperCase()}`,
-              body: notif.body,
-              data: { order_id: id, status },
-              notification_channel: "both",
-            }).catch(() => {});
-
-            // Telegram message via send-message edge function
-            const botToken = Deno.env.get("TELEGRAM_BOT_TOKEN");
-            if (botToken) {
-              await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  chat_id: order.telegram_user_id,
-                  text: `${notif.telegram}\n\n📋 Заказ <b>#${id.slice(0, 8).toUpperCase()}</b>`,
-                  parse_mode: "HTML",
-                }),
-              }).catch(() => {});
-            }
-          }
+          await supabase.from("notifications").insert({
+            telegram_user_id: order.telegram_user_id,
+            type: `order_${status}`,
+            title: `Заказ #${id.slice(0, 8).toUpperCase()}`,
+            body: `Статус изменён: ${STATUS_LABELS[status] || status}`,
+            data: { order_id: id, status },
+          }).catch(() => {});
         }
 
         result = updatedOrder;

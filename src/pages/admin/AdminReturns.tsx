@@ -5,8 +5,7 @@ import { useAllReturns, useUpdateReturnStatus, useAdjustStock } from '../../lib/
 import { toast } from '../../components/Toast';
 import { auditLogQueries } from '../../lib/supabase/queries';
 import { getCurrentAdmin } from '../../lib/auth';
-import { notifyClient } from '../../lib/notifications';
-import { supabase } from '../../lib/supabase';
+
 import type { Return } from '../../lib/supabase/queries';
 
 const STATUS_LABELS: Record<Return['status'], string> = {
@@ -28,81 +27,38 @@ export const AdminReturns = () => {
   const { data: returns = [], isLoading } = useAllReturns();
   const updateStatus = useUpdateReturnStatus();
   const adjustStock = useAdjustStock();
-
+  
   const [adminNote, setAdminNote] = useState('');
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
-  const [processingId, setProcessingId] = useState<string | null>(null);
 
   const handleStatusUpdate = async (id: string, status: Return['status']) => {
-    const ret = returns.find((r) => r.id === id);
-    setProcessingId(id);
-    try {
-      await updateStatus.mutateAsync({ id, status, adminNote: adminNote || undefined });
-      toast.success(`Статус: ${STATUS_LABELS[status]}`);
+    const ret = returns.find(r => r.id === id);
 
-      // Restore stock when refund is confirmed
-      if (status === 'refunded' && ret?.items && Array.isArray(ret.items)) {
-        const items = ret.items as Array<{ productId: string; quantity: number }>;
-        for (const item of items) {
-          if (item.productId && item.quantity > 0) {
-            try {
-              await adjustStock.mutateAsync({ productId: item.productId, delta: item.quantity });
-            } catch {
-              // Stock restore failure — log but don't block the refund
-              console.error(`Failed to restore stock for product ${item.productId}`);
-            }
+    await updateStatus.mutateAsync({ id, status, adminNote: adminNote || undefined });
+    toast.success(`Статус: ${STATUS_LABELS[status]}`);
+
+    // Restore stock when refund is confirmed
+    if (status === 'refunded' && ret?.items && Array.isArray(ret.items)) {
+      for (const item of ret.items as Array<{ productId: string; quantity: number }>) {
+        if (item.productId && item.quantity > 0) {
+          try {
+            await adjustStock.mutateAsync({ productId: item.productId, delta: item.quantity });
+          } catch {
+            // Stock restoration failed — log but don't block
           }
         }
-        // Mark order as hidden from client (returned)
-        if (ret.order_id) {
-          await supabase
-            .from('orders')
-            .update({
-              status: 'returned',
-              is_visible_to_client: false,
-              is_archived: true,
-              archived_at: new Date().toISOString(),
-              archive_reason: `Возврат подтверждён${adminNote ? `: ${adminNote}` : ''}`,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('id', ret.order_id);
-        }
       }
-
-      // Send notification to client
-      if (ret?.telegram_user_id) {
-        const eventMap: Record<Return['status'], 'return_approved' | 'return_rejected' | 'return_refunded' | null> = {
-          pending: null,
-          approved: 'return_approved',
-          rejected: 'return_rejected',
-          refunded: 'return_refunded',
-        };
-        const event = eventMap[status];
-        if (event) {
-          await notifyClient({
-            telegramUserId: ret.telegram_user_id,
-            event,
-            orderId: ret.order_id,
-            extra: adminNote || undefined,
-            channels: ['in_app', 'telegram'],
-          });
-        }
-      }
-
-      auditLogQueries.log({
-        admin_id: admin?.id ?? 'unknown',
-        action: 'status_change',
-        entity_type: 'returns',
-        entity_id: id,
-        details: { new_status: status, admin_note: adminNote, order_id: ret?.order_id },
-      }).catch(() => {});
-
-      setAdminNote('');
-    } catch {
-      toast.error('Ошибка обновления статуса');
-    } finally {
-      setProcessingId(null);
     }
+
+    auditLogQueries.log({
+      admin_id: admin?.id ?? 'unknown',
+      action: 'status_change',
+      entity_type: 'returns',
+      entity_id: id,
+      details: { new_status: status, admin_note: adminNote, order_id: ret?.order_id },
+    }).catch(() => {});
+
+    setAdminNote('');
   };
 
   return (
@@ -114,15 +70,12 @@ export const AdminReturns = () => {
           </Link>
           <RotateCcw className="w-5 h-5 text-surface-900" />
           <h1 className="text-lg font-bold text-surface-900 dark:text-white">Возвраты</h1>
-          <span className="ml-auto text-xs text-surface-400">{returns.filter((r) => r.status === 'pending').length} ожидают</span>
         </div>
       </header>
 
       <main className="max-w-4xl mx-auto px-4 py-6 space-y-3">
         {isLoading ? (
-          <div className="text-center py-12">
-            <span className="w-8 h-8 border-4 border-surface-900 border-t-transparent rounded-full animate-spin" />
-          </div>
+          <div className="text-center py-12"><span className="w-8 h-8 border-4 border-surface-900 border-t-transparent rounded-full animate-spin" /></div>
         ) : returns.length === 0 ? (
           <div className="text-center py-12">
             <RotateCcw className="w-10 h-10 text-surface-300 mx-auto mb-3" />
@@ -137,45 +90,23 @@ export const AdminReturns = () => {
                     Заказ #{ret.order_id.slice(0, 8).toUpperCase()}
                   </p>
                   <p className="text-xs text-surface-500 mt-0.5">
-                    {new Date(ret.created_at).toLocaleDateString('ru-RU', {
-                      day: 'numeric', month: 'short', year: 'numeric',
-                    })}
-                  </p>
-                  <p className="text-xs text-surface-400 mt-0.5">
-                    Telegram ID: {ret.telegram_user_id}
+                    {new Date(ret.created_at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' })}
                   </p>
                 </div>
-                <span className={`text-xs px-2.5 py-1 rounded-full font-semibold ${STATUS_COLORS[ret.status as Return['status']]}`}>
-                  {STATUS_LABELS[ret.status as Return['status']]}
+                <span className={`text-xs px-2.5 py-1 rounded-full font-semibold ${STATUS_COLORS[ret.status as Return["status"]]}`}>
+                  {STATUS_LABELS[ret.status as Return["status"]]}
                 </span>
               </div>
-
               <p className="text-sm text-surface-700 dark:text-surface-300 mb-2">
                 <span className="text-surface-500">Причина:</span> {ret.reason}
               </p>
 
-              {/* Returned items */}
-              {Array.isArray(ret.items) && (ret.items as Array<{ name: string; quantity: number; price: number }>).length > 0 && (
-                <div className="mb-3 bg-surface-50 dark:bg-surface-700 rounded-xl p-3 space-y-1">
-                  <p className="text-xs font-semibold text-surface-500 mb-2">Товары к возврату:</p>
-                  {(ret.items as Array<{ name: string; quantity: number; price: number }>).map((item, i) => (
-                    <div key={i} className="flex justify-between text-sm">
-                      <span className="text-surface-700 dark:text-surface-300">{item.name} × {item.quantity}</span>
-                      <span className="font-semibold text-surface-900 dark:text-white">
-                        {(item.price * item.quantity).toLocaleString()} сум
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Photos */}
-              {Array.isArray((ret as Return & { photos?: string[] }).photos) &&
-               ((ret as Return & { photos?: string[] }).photos ?? []).length > 0 && (
+              {/* Photos from customer */}
+              {Array.isArray((ret as Return & { photos?: string[] }).photos) && ((ret as Return & { photos?: string[] }).photos ?? []).length > 0 && (
                 <div className="mb-3">
                   <p className="text-xs text-surface-500 mb-1.5">Фото от клиента:</p>
                   <div className="flex gap-2 flex-wrap">
-                    {((ret as Return & { photos?: string[] }).photos ?? []).map((url, i) => (
+                    {((ret as Return & { photos?: string[] }).photos ?? []).map((url: string, i: number) => (
                       <button
                         key={i}
                         onClick={() => setLightboxUrl(url)}
@@ -194,50 +125,26 @@ export const AdminReturns = () => {
               {ret.admin_note && (
                 <p className="text-xs text-surface-500 mb-2 italic">Комментарий: {ret.admin_note}</p>
               )}
-
               {ret.status === 'pending' && (
                 <div className="flex items-center gap-2 mt-3">
                   <input
                     value={adminNote}
                     onChange={(e) => setAdminNote(e.target.value)}
-                    placeholder="Комментарий для клиента..."
+                    placeholder="Комментарий..."
                     className="flex-1 input-premium text-xs py-2"
                   />
-                  <button
-                    onClick={() => handleStatusUpdate(ret.id, 'approved')}
-                    disabled={processingId === ret.id}
-                    className="p-2 rounded-lg bg-success/10 text-success hover:bg-success/20 transition disabled:opacity-50"
-                    title="Одобрить"
-                  >
+                  <button onClick={() => handleStatusUpdate(ret.id, 'approved')} className="p-2 rounded-lg bg-success/10 text-success hover:bg-success/20 transition">
                     <Check className="w-4 h-4" />
                   </button>
-                  <button
-                    onClick={() => handleStatusUpdate(ret.id, 'rejected')}
-                    disabled={processingId === ret.id}
-                    className="p-2 rounded-lg bg-danger/10 text-danger hover:bg-danger/20 transition disabled:opacity-50"
-                    title="Отклонить"
-                  >
+                  <button onClick={() => handleStatusUpdate(ret.id, 'rejected')} className="p-2 rounded-lg bg-danger/10 text-danger hover:bg-danger/20 transition">
                     <X className="w-4 h-4" />
                   </button>
                 </div>
               )}
-
               {ret.status === 'approved' && (
-                <div className="mt-3 space-y-2">
-                  <p className="text-xs text-surface-500">
-                    После фактического получения товара подтвердите возврат — товар вернётся на склад автоматически.
-                  </p>
-                  <button
-                    onClick={() => handleStatusUpdate(ret.id, 'refunded')}
-                    disabled={processingId === ret.id}
-                    className="btn-brand px-4 py-2 rounded-xl text-xs flex items-center gap-2 disabled:opacity-50"
-                  >
-                    {processingId === ret.id && (
-                      <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                    )}
-                    Подтвердить возврат (товар получен)
-                  </button>
-                </div>
+                <button onClick={() => handleStatusUpdate(ret.id, 'refunded')} className="btn-brand px-4 py-2 rounded-xl text-xs mt-3">
+                  Подтвердить возврат
+                </button>
               )}
             </div>
           ))

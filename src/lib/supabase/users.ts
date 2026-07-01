@@ -75,7 +75,7 @@ export const favoriteQueries = {
     if (error) throw error;
     return (data ?? [])
       .filter((row) => row.products !== null)
-      .map((row) => ({ ...(row.products as Product), favoriteId: row.product_id })) as (Product & { favoriteId: string })[];
+      .map((row) => ({ ...(row.products as unknown as Product), favoriteId: row.product_id })) as (Product & { favoriteId: string })[];
   },
 
   getProductIds: async (telegramUserId: number) => {
